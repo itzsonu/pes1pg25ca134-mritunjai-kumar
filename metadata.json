@@ -1,0 +1,6 @@
+{
+  "name": "Library Management System",
+  "description": "Manage a library catalogue, registered members, and book issue and return circulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
