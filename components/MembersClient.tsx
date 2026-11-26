@@ -1,26 +1,17 @@
-import { useState, type FormEvent } from 'react';
-import { formatShortDate } from '../lib/libraryRules';
-import type { MemberWithStats } from '../types/library';
+'use client';
 
-interface MembersViewProps {
-  members: MemberWithStats[];
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-  onCreateMember: (input: {
-    name: string;
-    email: string;
-    department: string;
-  }) => Promise<void>;
+import { useRouter } from 'next/navigation';
+import { useState, type FormEvent } from 'react';
+import { formatShortDate } from '@/lib/libraryUtils';
+import type { MemberItem } from '@/lib/types';
+
+interface MembersClientProps {
+  initialMembers: MemberItem[];
+  initialError: string | null;
 }
 
-export function MembersView({
-  members,
-  loading,
-  error,
-  onRetry,
-  onCreateMember,
-}: MembersViewProps) {
+export function MembersClient({ initialMembers, initialError }: MembersClientProps) {
+  const router = useRouter();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [department, setDepartment] = useState('Computer Applications');
@@ -34,18 +25,34 @@ export function MembersView({
       setFormError('Please provide both full name and email address.');
       return;
     }
+
     setFormError(null);
     setSuccessMessage(null);
     setSubmitting(true);
+
     try {
-      await onCreateMember({
-        name: name.trim(),
-        email: email.trim(),
-        department: department.trim() || 'Computer Applications',
+      const response = await fetch('/api/members', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: name.trim(),
+          email: email.trim(),
+          department: department.trim() || 'Computer Applications',
+        }),
       });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === 'string'
+            ? payload.error
+            : 'Unable to register member.',
+        );
+      }
+
       setSuccessMessage(`Registered ${name.trim()} to the library directory.`);
       setName('');
       setEmail('');
+      router.refresh();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Unable to register member.');
     } finally {
@@ -63,6 +70,15 @@ export function MembersView({
           Register new borrowers and review active loan counts per member.
         </p>
       </div>
+
+      {initialError && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
+        >
+          {initialError}
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-3 items-start">
         {/* Member Registration Form */}
@@ -150,25 +166,9 @@ export function MembersView({
           <div className="border-b border-slate-200 px-5 py-4 flex items-center justify-between">
             <h2 className="text-base font-semibold text-slate-900">Member Directory</h2>
             <span className="text-xs text-slate-500 font-mono-tabular">
-              {members.length} registered
+              {initialMembers.length} registered
             </span>
           </div>
-
-          {error && (
-            <div
-              role="alert"
-              className="m-4 flex items-center justify-between rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800"
-            >
-              <span>{error}</span>
-              <button
-                type="button"
-                onClick={onRetry}
-                className="rounded border border-red-300 bg-white px-2.5 py-1 font-medium"
-              >
-                Retry
-              </button>
-            </div>
-          )}
 
           <div className="overflow-x-auto">
             <table className="w-full border-collapse text-left text-sm">
@@ -192,34 +192,14 @@ export function MembersView({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {loading ? (
-                  Array.from({ length: 4 }).map((_, i) => (
-                    <tr key={i} className="animate-pulse">
-                      <td className="px-5 py-3.5">
-                        <div className="h-4 w-16 rounded bg-slate-100" />
-                      </td>
-                      <td className="px-4 py-3.5">
-                        <div className="h-4 w-36 rounded bg-slate-200" />
-                      </td>
-                      <td className="px-4 py-3.5">
-                        <div className="h-4 w-28 rounded bg-slate-100" />
-                      </td>
-                      <td className="px-4 py-3.5 text-right">
-                        <div className="ml-auto h-4 w-8 rounded bg-slate-100" />
-                      </td>
-                      <td className="px-5 py-3.5 text-right">
-                        <div className="ml-auto h-4 w-20 rounded bg-slate-100" />
-                      </td>
-                    </tr>
-                  ))
-                ) : members.length === 0 ? (
+                {initialMembers.length === 0 ? (
                   <tr>
                     <td colSpan={5} className="px-5 py-10 text-center text-xs text-slate-500">
                       No members registered yet.
                     </td>
                   </tr>
                 ) : (
-                  members.map((member) => (
+                  initialMembers.map((member) => (
                     <tr key={member.id} className="hover:bg-slate-50/70 transition-colors">
                       <td className="px-5 py-3.5 text-xs font-medium text-slate-700 font-mono-tabular whitespace-nowrap">
                         {member.memberCode}

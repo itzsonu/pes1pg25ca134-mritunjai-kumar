@@ -1,148 +1,107 @@
-# Library Management System
+# Library Management System (Project 10)
 
-A full-stack web application for managing a library catalogue, registered members, and book circulation. Library staff can add books, register members, issue books, process returns, and track due dates from one interface.
+A full-stack **Next.js App Router** Library Management System backed by **PostgreSQL** and **Prisma ORM**. Built for managing book holdings, registered library members, and transactional issue/return circulation workflows.
 
-## Features
+**Author:** MRITUNJAI KUMAR  
+**SRN:** PES1PG25CA134  
+**Course:** UQ25CA752A — WAF-II Experiential Learning (Unit-4, Project 10)
 
-### Book Catalogue
+---
 
-- View the library's books and see total, available, and issued counts.
-- Search books by title, author, ISBN, or call number.
-- Filter the catalogue by availability.
-- Add a book with its title, author, ISBN, category, call number, and publication year.
-- Open a book's details and view its loan history.
+## Overview & Features
 
-### Members
+- **Server-Rendered Catalogue (`/library`)**: Displays live book inventory, summary counts (Total Books, Available, Issued, Registered Members), availability status, and active borrower due dates directly from PostgreSQL.
+- **Search & Availability Filtering**: Search books by title, author, ISBN, or call number, and filter by `All Books`, `Available Books`, or `Issued Books` with a clear empty-state message when no matches exist.
+- **Book Detail & Circulation (`/library/books/[id]`)**: Displays full book metadata, circulation history, an inline **Issue to Member** form when available, and a **Return Book** action when issued.
+- **Loans Ledger (`/library/loans`)**: Tracks active and returned loans with due dates, overdue detection, and one-click returns.
+- **Member Management (`/library/members`)**: Registers new library members with automatic institutional member codes (`LIB-101`, etc.) and displays active loan counts.
+- **Add Book Modal**: Allows adding new books to the catalogue with server-side validation and duplicate ISBN protection.
 
-- Register members with a name, email address, and department.
-- View member codes, departments, and active loan counts.
-- Validate email addresses and prevent duplicate registrations.
+---
 
-### Loans and Circulation
+## Core Concepts Used
 
-- Issue an available book to a registered member.
-- Set a loan period from 1 to 60 days; the default is 14 days.
-- View active, returned, and overdue loans.
-- Return an issued book and update its availability.
-- Prevent a book from being issued again while it has an active loan.
+1. **Database Integration (PostgreSQL + Prisma)**: Relational `Book`, `Member`, and `Loan` models in `prisma/schema.prisma` with foreign keys, indexes, and atomic `$transaction` updates in `lib/libraryService.ts`.
+2. **Server-Side Rendering (Next.js App Router)**: Default Server Components (`app/library/page.tsx`, `app/library/books/[id]/page.tsx`, `app/library/loans/page.tsx`, `app/library/members/page.tsx`) fetch up-to-date PostgreSQL records on each request, keeping database access strictly on the server and limiting `'use client'` to small interactive controls.
+3. **API Development (Route Handlers)**: REST endpoints under `app/api/` validate payloads on the server, enforce business rules, and return semantic HTTP status codes (`200`, `201`, `400`, `404`, `409`, `500`) without exposing raw database errors.
 
-## Technology Stack
+---
 
-- **Frontend:** React 19, TypeScript, Vite
-- **Styling:** Tailwind CSS
-- **Backend:** Node.js and Express
-- **Storage:** Local JSON file
-- **Icons and motion:** Lucide React and Motion
+## Tech Stack
 
-## Getting Started
+- **Framework**: Next.js 16 (App Router) with React 19 & TypeScript
+- **Database**: PostgreSQL with Prisma ORM (`@prisma/client` / `prisma`)
+- **Styling**: Tailwind CSS v4 (`@tailwindcss/postcss`)
+- **Icons**: Lucide React
 
-### Prerequisites
+---
 
-Install Node.js and npm.
+## Local Setup & Database Migration
 
-### Installation
+1. **Install dependencies**:
+   ```bash
+   npm install
+   ```
 
-```bash
-git clone https://github.com/itzsonu/library-management-system.git
-cd library-management-system
-npm install
-```
+2. **Configure environment variables**:
+   Copy `.env.example` to `.env.local` (and `.env` if running Prisma CLI commands directly without `dotenv`):
+   ```bash
+   cp .env.example .env.local
+   ```
+   Update `DATABASE_URL` in `.env.local` with your PostgreSQL connection string:
+   ```env
+   DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/library_db?schema=public"
+   ```
 
-### Run in development mode
+3. **Generate Prisma Client & apply database migrations**:
+   ```bash
+   npx prisma generate
+   npx prisma migrate dev --name init
+   ```
 
-```bash
-npm run dev
-```
+4. **Seed synthetic sample data**:
+   ```bash
+   npm run db:seed
+   ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+5. **Run the development server**:
+   ```bash
+   npm run dev
+   ```
+   Open `http://localhost:3000/library`.
 
-The development server runs the Express API and serves the Vite application.
-
-## Available Scripts
-
-| Command | Description |
-| --- | --- |
-| `npm run dev` | Start the application in development mode |
-| `npm run build` | Build the frontend with Vite |
-| `npm run lint` | Check TypeScript types without generating output |
-
-Business-rule tests are located in `src/lib/libraryRules.test.ts`. A test script is not currently configured in `package.json`.
+---
 
 ## API Endpoints
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/health` | Check whether the server is running |
-| `GET` | `/api/books` | List books; supports search and availability filters |
-| `POST` | `/api/books` | Add a book |
-| `GET` | `/api/books/:id` | Get a book and its loan history |
-| `GET` | `/api/members` | List registered members |
-| `POST` | `/api/members` | Register a member |
-| `GET` | `/api/loans` | List loans |
-| `POST` | `/api/loans` | Issue a book |
-| `POST` | `/api/loans/:id/return` | Return a book |
+| Method | Endpoint | Description | Status Codes |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/books?q=&status=` | Search/filter books and catalogue summary | `200`, `500` |
+| `POST` | `/api/books` | Add a new book to the catalogue | `201`, `400`, `409`, `500` |
+| `GET` | `/api/books/[id]` | Get book details and circulation history | `200`, `404`, `500` |
+| `GET` | `/api/members` | List members with active/total loan counts | `200`, `500` |
+| `POST` | `/api/members` | Register a new member | `201`, `400`, `409`, `500` |
+| `GET` | `/api/loans?status=` | List all, active, or returned loans | `200`, `500` |
+| `POST` | `/api/loans` | Issue an available book to a member | `201`, `400`, `404`, `409`, `500` |
+| `POST` | `/api/loans/[id]/return` | Return an active loan and restore availability | `200`, `400`, `404`, `409`, `500` |
 
-### Example: Add a book
+---
 
-```json
-{
-  "title": "Database Internals",
-  "author": "Alex Petrov",
-  "isbn": "978-1492040347",
-  "category": "Databases",
-  "callNumber": "QA76.9.D3 P48",
-  "publishedYear": 2019
-}
-```
+## Verification Checklist
 
-### Example: Register a member
+- [x] Search books by title and author; verify clear empty state on unmatched queries.
+- [x] Issue an available book (`POST /api/loans`) and confirm `Book.available` becomes `false`.
+- [x] Attempt to issue the same book again and confirm HTTP `409 Conflict` rejection.
+- [x] Return the active loan (`POST /api/loans/[id]/return`) and confirm `returnedAt` is recorded and `Book.available` becomes `true`.
+- [x] Attempt a duplicate return on the same loan and confirm safe `409 Conflict` handling without altering state.
+- [x] Verify `404` on unknown book/member/loan IDs and `400` on missing/invalid inputs.
 
-```json
-{
-  "name": "Aarav Nair",
-  "email": "aarav.nair@example.edu",
-  "department": "Computer Applications"
-}
-```
+---
 
-### Example: Issue a book
+## Vercel Deployment Notes
 
-```json
-{
-  "bookId": "book-1",
-  "memberId": "member-1",
-  "loanDays": 14
-}
-```
-
-The loans endpoint accepts `status=all`, `status=active`, or `status=returned`. The books endpoint accepts a search query `q` and `status=all`, `status=available`, or `status=issued`.
-
-## Data Storage
-
-The application creates a `data/library.json` file the first time it accesses the library data. If the file does not exist, it initializes it with sample books, members, and loan records. Data is stored in this local JSON file; the project does not currently use a separate database server.
-
-## Project Structure
-
-```text
-.
-├── server.ts                  # Express server and API routes
-├── server/
-│   └── store.ts               # JSON-file storage and sample data
-├── src/
-│   ├── App.tsx                # Main application and navigation
-│   ├── components/            # Catalogue, member, loan, and book views
-│   ├── lib/
-│   │   ├── api.ts             # Frontend API requests
-│   │   ├── libraryRules.ts    # Library business rules
-│   │   └── libraryRules.test.ts
-│   └── types/
-│       └── library.ts         # TypeScript data models
-├── package.json
-├── tsconfig.json
-└── vite.config.ts
-```
-
-## Author
-
-**Name:** MRITUNJAI KUMAR  
-**SRN:** PES1PG25CA134
+- Suggested repository name per assignment convention (`srn-name`): **`pes1pg25ca134-mritunjai-kumar`**
+- Provision a hosted PostgreSQL database (such as Vercel Postgres, Neon, or Supabase).
+- Set `DATABASE_URL` in **Vercel Project → Settings → Environment Variables**.
+- Run `npx prisma migrate deploy` and `npm run db:seed` against the production database after connecting `DATABASE_URL`.
+- Build command: `npm run build` (`prisma generate && next build`).

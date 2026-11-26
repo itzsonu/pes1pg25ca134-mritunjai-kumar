@@ -1,4 +1,6 @@
 node_modules/
+.next/
+out/
 build/
 dist/
 coverage/
@@ -7,6 +9,7 @@ coverage/
 .env*
 !.env.example
 .playwright-cli/
-data/
 .aistudio/
-public/assets/aistudio/
+.vercel/
+next-env.d.ts
+*.tsbuildinfo

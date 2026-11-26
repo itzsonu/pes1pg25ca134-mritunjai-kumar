@@ -1,0 +1,50 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Book {
+  id            String   @id @default(cuid())
+  title         String
+  author        String
+  isbn          String   @unique
+  category      String   @default("General Collection")
+  callNumber    String
+  publishedYear Int
+  available     Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  loans         Loan[]
+
+  @@index([title])
+  @@index([author])
+  @@index([available])
+}
+
+model Member {
+  id         String   @id @default(cuid())
+  memberCode String   @unique
+  name       String
+  email      String   @unique
+  department String   @default("Computer Applications")
+  joinedAt   DateTime @default(now())
+  loans      Loan[]
+}
+
+model Loan {
+  id         String    @id @default(cuid())
+  bookId     String
+  memberId   String
+  issuedAt   DateTime  @default(now())
+  dueAt      DateTime
+  returnedAt DateTime?
+
+  book   Book   @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([bookId, returnedAt])
+  @@index([memberId, returnedAt])
+}

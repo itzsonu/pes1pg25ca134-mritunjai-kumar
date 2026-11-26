@@ -1,55 +1,144 @@
-import { Search, X } from 'lucide-react';
-import { formatShortDate } from '../lib/libraryRules';
-import type { AvailabilityFilter, BookWithLoan } from '../types/library';
+'use client';
 
-interface CatalogueViewProps {
-  books: BookWithLoan[];
-  summary: {
-    totalBooks: number;
-    availableBooks: number;
-    issuedBooks: number;
-    totalMembers: number;
-  };
-  searchQuery: string;
-  onSearchChange: (value: string) => void;
-  availabilityFilter: AvailabilityFilter;
-  onFilterChange: (value: AvailabilityFilter) => void;
-  loading: boolean;
-  error: string | null;
-  onRetry: () => void;
-  onOpenBook: (bookId: string) => void;
-  onQuickReturn: (loanId: string, bookTitle: string) => Promise<void>;
-  returningLoanId: string | null;
-  onOpenAddBook: () => void;
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { Search, X } from 'lucide-react';
+import { formatShortDate } from '@/lib/libraryUtils';
+import type { AvailabilityFilter, BookItem, CatalogueSummary } from '@/lib/types';
+
+interface CatalogueClientProps {
+  initialBooks: BookItem[];
+  initialSummary: CatalogueSummary;
+  initialQuery: string;
+  initialStatus: AvailabilityFilter;
+  initialError: string | null;
 }
 
-export function CatalogueView({
-  books,
-  summary,
-  searchQuery,
-  onSearchChange,
-  availabilityFilter,
-  onFilterChange,
-  loading,
-  error,
-  onRetry,
-  onOpenBook,
-  onQuickReturn,
-  returningLoanId,
-  onOpenAddBook,
-}: CatalogueViewProps) {
+export function CatalogueClient({
+  initialBooks,
+  initialSummary,
+  initialQuery,
+  initialStatus,
+  initialError,
+}: CatalogueClientProps) {
+  const router = useRouter();
+  const [books, setBooks] = useState<BookItem[]>(initialBooks);
+  const [summary, setSummary] = useState<CatalogueSummary>(initialSummary);
+  const [searchQuery, setSearchQuery] = useState(initialQuery);
+  const [availabilityFilter, setAvailabilityFilter] =
+    useState<AvailabilityFilter>(initialStatus);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(initialError);
+  const [returningLoanId, setReturningLoanId] = useState<string | null>(null);
+  const [banner, setBanner] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setBooks(initialBooks);
+    setSummary(initialSummary);
+    setError(initialError);
+  }, [initialBooks, initialSummary, initialError]);
+
+  const fetchFiltered = async (query: string, status: AvailabilityFilter) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      if (query.trim()) params.set('q', query.trim());
+      if (status !== 'all') params.set('status', status);
+      const qs = params.toString();
+      const response = await fetch(`/api/books${qs ? `?${qs}` : ''}`);
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === 'string'
+            ? payload.error
+            : 'Unable to load library catalogue.',
+        );
+      }
+      setBooks(payload.books ?? []);
+      if (payload.summary) {
+        setSummary(payload.summary);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to load library catalogue.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    void fetchFiltered(value, availabilityFilter);
+  };
+
+  const handleFilterChange = (nextStatus: AvailabilityFilter) => {
+    setAvailabilityFilter(nextStatus);
+    void fetchFiltered(searchQuery, nextStatus);
+  };
+
+  const handleQuickReturn = async (loanId: string, bookTitle: string) => {
+    setReturningLoanId(loanId);
+    setBanner(null);
+    try {
+      const response = await fetch(`/api/loans/${encodeURIComponent(loanId)}/return`, {
+        method: 'POST',
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === 'string' ? payload.error : 'Unable to return book.',
+        );
+      }
+      setBanner({
+        type: 'success',
+        message: `Returned "${bookTitle}" to the available shelf.`,
+      });
+      await fetchFiltered(searchQuery, availabilityFilter);
+      router.refresh();
+    } catch (err) {
+      setBanner({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Unable to return book.',
+      });
+    } finally {
+      setReturningLoanId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
-            Library Catalogue
-          </h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Search holdings by title or author, check real-time shelf availability, and process issue or return transactions.
-          </p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
+          Library Catalogue
+        </h1>
+        <p className="mt-1 text-sm text-slate-600">
+          Search holdings by title or author, inspect availability from PostgreSQL records, and process issue or return transactions.
+        </p>
       </div>
+
+      {banner && (
+        <div
+          role={banner.type === 'error' ? 'alert' : 'status'}
+          className={`flex items-center justify-between gap-4 rounded-lg border px-4 py-3 text-sm ${
+            banner.type === 'error'
+              ? 'border-red-200 bg-red-50 text-red-800'
+              : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+          }`}
+        >
+          <span>{banner.message}</span>
+          <button
+            type="button"
+            onClick={() => setBanner(null)}
+            className="text-xs font-medium underline hover:no-underline whitespace-nowrap shrink-0"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Summary KPI strip */}
       <section
@@ -96,14 +185,14 @@ export function CatalogueView({
             id="catalogue-search"
             type="search"
             value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="Search books by title, author, or call number..."
             className="w-full rounded-lg border border-slate-200 bg-white py-2.5 pl-9 pr-9 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-900 focus:outline-none"
           />
           {searchQuery && (
             <button
               type="button"
-              onClick={() => onSearchChange('')}
+              onClick={() => handleSearchChange('')}
               aria-label="Clear search"
               className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-slate-400 hover:text-slate-700"
             >
@@ -131,7 +220,7 @@ export function CatalogueView({
                 type="button"
                 role="tab"
                 aria-selected={active}
-                onClick={() => onFilterChange(tab.id)}
+                onClick={() => handleFilterChange(tab.id)}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
                   active
                     ? 'bg-slate-900 text-white'
@@ -153,7 +242,7 @@ export function CatalogueView({
           <span>{error}</span>
           <button
             type="button"
-            onClick={onRetry}
+            onClick={() => fetchFiltered(searchQuery, availabilityFilter)}
             className="rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-800 hover:bg-red-100 whitespace-nowrap shrink-0"
           >
             Retry
@@ -212,50 +301,40 @@ export function CatalogueView({
                     <p className="text-sm font-medium text-slate-900">
                       {searchQuery.trim()
                         ? `No books matched "${searchQuery.trim()}".`
-                        : 'No books match the selected availability filter.'}
+                        : 'No books found in the catalogue.'}
                     </p>
                     <p className="mt-1 text-xs text-slate-500">
                       {searchQuery.trim()
                         ? 'Try searching by a different title, author name, or clear your filters.'
-                        : 'Switch filter tabs or add a new book to the library catalogue.'}
+                        : 'Ensure database migrations and seed data have been applied, or add a new book.'}
                     </p>
-                    <div className="mt-4 flex items-center justify-center gap-3">
-                      {(searchQuery.trim() || availabilityFilter !== 'all') && (
+                    {(searchQuery.trim() || availabilityFilter !== 'all') && (
+                      <div className="mt-4">
                         <button
                           type="button"
                           onClick={() => {
-                            onSearchChange('');
-                            onFilterChange('all');
+                            setSearchQuery('');
+                            setAvailabilityFilter('all');
+                            void fetchFiltered('', 'all');
                           }}
                           className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
                         >
                           Clear Filters
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={onOpenAddBook}
-                        className="rounded-lg bg-slate-900 px-4 py-2 text-xs font-medium text-white hover:bg-slate-800"
-                      >
-                        Add Book
-                      </button>
-                    </div>
+                      </div>
+                    )}
                   </td>
                 </tr>
               ) : (
                 books.map((book) => (
                   <tr key={book.id} className="hover:bg-slate-50/70 transition-colors">
                     <td className="px-5 py-3.5">
-                      <a
+                      <Link
                         href={`/library/books/${book.id}`}
-                        onClick={(e) => {
-                          e.preventDefault();
-                          onOpenBook(book.id);
-                        }}
                         className="font-medium text-slate-900 hover:text-slate-700 hover:underline focus-visible:outline-none focus-visible:underline"
                       >
                         {book.title}
-                      </a>
+                      </Link>
                       <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                         <span>{book.author}</span>
                         <span aria-hidden="true">·</span>
@@ -290,28 +369,26 @@ export function CatalogueView({
                     </td>
                     <td className="px-5 py-3.5 text-right whitespace-nowrap">
                       {book.available ? (
-                        <button
-                          type="button"
-                          onClick={() => onOpenBook(book.id)}
+                        <Link
+                          href={`/library/books/${book.id}`}
                           aria-label={`Issue ${book.title}`}
-                          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                          className="inline-block rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
                         >
                           Issue
-                        </button>
+                        </Link>
                       ) : book.activeLoan ? (
                         <div className="inline-flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => onOpenBook(book.id)}
+                          <Link
+                            href={`/library/books/${book.id}`}
                             aria-label={`View details for ${book.title}`}
                             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0"
                           >
                             Details
-                          </button>
+                          </Link>
                           <button
                             type="button"
                             disabled={returningLoanId === book.activeLoan.id}
-                            onClick={() => onQuickReturn(book.activeLoan!.id, book.title)}
+                            onClick={() => handleQuickReturn(book.activeLoan!.id, book.title)}
                             aria-label={`Return ${book.title}`}
                             className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-900 hover:bg-slate-100 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
                           >

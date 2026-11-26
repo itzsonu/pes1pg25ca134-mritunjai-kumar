@@ -1,20 +1,16 @@
+'use client';
+
 import { useEffect, useState, type FormEvent } from 'react';
+import { useRouter } from 'next/navigation';
 import { X } from 'lucide-react';
 
 interface AddBookModalProps {
   open: boolean;
   onClose: () => void;
-  onAddBook: (input: {
-    title: string;
-    author: string;
-    isbn: string;
-    category: string;
-    callNumber: string;
-    publishedYear: number;
-  }) => Promise<void>;
 }
 
-export function AddBookModal({ open, onClose, onAddBook }: AddBookModalProps) {
+export function AddBookModal({ open, onClose }: AddBookModalProps) {
+  const router = useRouter();
   const [title, setTitle] = useState('');
   const [author, setAuthor] = useState('');
   const [isbn, setIsbn] = useState('');
@@ -45,19 +41,35 @@ export function AddBookModal({ open, onClose, onAddBook }: AddBookModalProps) {
     setError(null);
     setSubmitting(true);
     try {
-      await onAddBook({
-        title: title.trim(),
-        author: author.trim(),
-        isbn: isbn.trim(),
-        category: category.trim() || 'General Collection',
-        callNumber: callNumber.trim(),
-        publishedYear: Number(publishedYear) || new Date().getFullYear(),
+      const response = await fetch('/api/books', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: title.trim(),
+          author: author.trim(),
+          isbn: isbn.trim(),
+          category: category.trim() || 'General Collection',
+          callNumber: callNumber.trim(),
+          publishedYear: Number(publishedYear) || new Date().getFullYear(),
+        }),
       });
+
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.error === 'string'
+            ? payload.error
+            : 'Unable to add book to catalogue.',
+        );
+      }
+
       setTitle('');
       setAuthor('');
       setIsbn('');
       setCallNumber('');
       onClose();
+      router.push('/library');
+      router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to add book.');
     } finally {
