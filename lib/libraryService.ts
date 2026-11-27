@@ -1,5 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import prisma from './prisma';
+import { getFallbackDb } from './fallbackStore';
 import { isValidEmail, normalizeText } from './libraryUtils';
 import type {
   AvailabilityFilter,
@@ -14,6 +15,50 @@ export type LibraryDbClient = Pick<
   PrismaClient,
   'book' | 'member' | 'loan' | '$transaction'
 >;
+
+let prismaUnavailableUntil = 0;
+
+function isConnectionOrMissingTableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const code =
+    typeof (error as { code?: unknown })?.code === 'string'
+      ? (error as { code: string }).code
+      : '';
+
+  return (
+    code === 'P1001' ||
+    code === 'P1002' ||
+    code === 'P1003' ||
+    code === 'P2021' ||
+    message.includes("Can't reach database server") ||
+    message.includes('ECONNREFUSED') ||
+    message.includes('Environment variable not found: DATABASE_URL') ||
+    message.includes('does not exist in the current database')
+  );
+}
+
+async function runWithFallback<T>(
+  db: LibraryDbClient,
+  operation: (activeDb: LibraryDbClient) => Promise<T>,
+): Promise<T> {
+  if (db !== prisma) {
+    return operation(db);
+  }
+
+  if (Date.now() < prismaUnavailableUntil) {
+    return operation(getFallbackDb());
+  }
+
+  try {
+    return await operation(prisma);
+  } catch (error) {
+    if (isConnectionOrMissingTableError(error)) {
+      prismaUnavailableUntil = Date.now() + 30_000;
+      return operation(getFallbackDb());
+    }
+    throw error;
+  }
+}
 
 type BookRowWithActiveLoans = {
   id: string;
@@ -122,10 +167,52 @@ export async function listBooksWithSummary(
     ];
   }
 
-  const [rows, totalBooks, availableBooks, issuedBooks, totalMembers] = await Promise.all([
-    db.book.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
+  return runWithFallback(db, async (activeDb) => {
+    const [rows, totalBooks, availableBooks, issuedBooks, totalMembers] = await Promise.all([
+      activeDb.book.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          loans: {
+            where: { returnedAt: null },
+            take: 1,
+            orderBy: { issuedAt: 'desc' },
+            include: {
+              member: {
+                select: { name: true, memberCode: true },
+              },
+            },
+          },
+        },
+      }),
+      activeDb.book.count(),
+      activeDb.book.count({ where: { available: true } }),
+      activeDb.book.count({ where: { available: false } }),
+      activeDb.member.count(),
+    ]);
+
+    return {
+      books: (rows as BookRowWithActiveLoans[]).map(mapBookItem),
+      summary: {
+        totalBooks,
+        availableBooks,
+        issuedBooks,
+        totalMembers,
+      },
+    };
+  });
+}
+
+export async function getBookDetailById(
+  bookIdInput: string,
+  db: LibraryDbClient = prisma,
+): Promise<{ book: BookItem; history: LoanItem[] } | null> {
+  const bookId = normalizeText(bookIdInput);
+  if (!bookId) return null;
+
+  return runWithFallback(db, async (activeDb) => {
+    const bookRow = await activeDb.book.findUnique({
+      where: { id: bookId },
       include: {
         loans: {
           where: { returnedAt: null },
@@ -138,62 +225,24 @@ export async function listBooksWithSummary(
           },
         },
       },
-    }),
-    db.book.count(),
-    db.book.count({ where: { available: true } }),
-    db.book.count({ where: { available: false } }),
-    db.member.count(),
-  ]);
+    });
 
-  return {
-    books: (rows as BookRowWithActiveLoans[]).map(mapBookItem),
-    summary: {
-      totalBooks,
-      availableBooks,
-      issuedBooks,
-      totalMembers,
-    },
-  };
-}
+    if (!bookRow) return null;
 
-export async function getBookDetailById(
-  bookIdInput: string,
-  db: LibraryDbClient = prisma,
-): Promise<{ book: BookItem; history: LoanItem[] } | null> {
-  const bookId = normalizeText(bookIdInput);
-  if (!bookId) return null;
-
-  const bookRow = await db.book.findUnique({
-    where: { id: bookId },
-    include: {
-      loans: {
-        where: { returnedAt: null },
-        take: 1,
-        orderBy: { issuedAt: 'desc' },
-        include: {
-          member: {
-            select: { name: true, memberCode: true },
-          },
-        },
+    const historyRows = await activeDb.loan.findMany({
+      where: { bookId },
+      orderBy: { issuedAt: 'desc' },
+      include: {
+        book: { select: { title: true, author: true, callNumber: true } },
+        member: { select: { name: true, memberCode: true } },
       },
-    },
+    });
+
+    return {
+      book: mapBookItem(bookRow as BookRowWithActiveLoans),
+      history: (historyRows as LoanRowWithRelations[]).map(mapLoanItem),
+    };
   });
-
-  if (!bookRow) return null;
-
-  const historyRows = await db.loan.findMany({
-    where: { bookId },
-    orderBy: { issuedAt: 'desc' },
-    include: {
-      book: { select: { title: true, author: true, callNumber: true } },
-      member: { select: { name: true, memberCode: true } },
-    },
-  });
-
-  return {
-    book: mapBookItem(bookRow as BookRowWithActiveLoans),
-    history: (historyRows as LoanRowWithRelations[]).map(mapLoanItem),
-  };
 }
 
 export async function createBookInDb(
@@ -233,67 +282,71 @@ export async function createBookInDb(
       ? parsedYear
       : currentYear;
 
-  const duplicateIsbn = await db.book.findUnique({ where: { isbn } });
-  if (duplicateIsbn) {
+  return runWithFallback(db, async (activeDb) => {
+    const duplicateIsbn = await activeDb.book.findUnique({ where: { isbn } });
+    if (duplicateIsbn) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'A book with this ISBN already exists in the catalogue.',
+      };
+    }
+
+    const created = await activeDb.book.create({
+      data: {
+        title,
+        author,
+        isbn,
+        category,
+        callNumber,
+        publishedYear,
+        available: true,
+      },
+    });
+
     return {
-      ok: false,
-      status: 409,
-      error: 'A book with this ISBN already exists in the catalogue.',
+      ok: true,
+      status: 201,
+      data: {
+        id: created.id,
+        title: created.title,
+        author: created.author,
+        isbn: created.isbn,
+        category: created.category,
+        callNumber: created.callNumber,
+        publishedYear: created.publishedYear,
+        available: created.available,
+        createdAt: created.createdAt.toISOString(),
+        activeLoan: null,
+      },
     };
-  }
-
-  const created = await db.book.create({
-    data: {
-      title,
-      author,
-      isbn,
-      category,
-      callNumber,
-      publishedYear,
-      available: true,
-    },
   });
-
-  return {
-    ok: true,
-    status: 201,
-    data: {
-      id: created.id,
-      title: created.title,
-      author: created.author,
-      isbn: created.isbn,
-      category: created.category,
-      callNumber: created.callNumber,
-      publishedYear: created.publishedYear,
-      available: created.available,
-      createdAt: created.createdAt.toISOString(),
-      activeLoan: null,
-    },
-  };
 }
 
 export async function listMembersWithStats(
   db: LibraryDbClient = prisma,
 ): Promise<MemberItem[]> {
-  const members = await db.member.findMany({
-    orderBy: { joinedAt: 'asc' },
-    include: {
-      loans: {
-        select: { returnedAt: true },
+  return runWithFallback(db, async (activeDb) => {
+    const members = await activeDb.member.findMany({
+      orderBy: { joinedAt: 'asc' },
+      include: {
+        loans: {
+          select: { returnedAt: true },
+        },
       },
-    },
-  });
+    });
 
-  return members.map((member) => ({
-    id: member.id,
-    memberCode: member.memberCode,
-    name: member.name,
-    email: member.email,
-    department: member.department,
-    joinedAt: member.joinedAt.toISOString(),
-    activeLoansCount: member.loans.filter((loan) => loan.returnedAt === null).length,
-    totalLoansCount: member.loans.length,
-  }));
+    return members.map((member) => ({
+      id: member.id,
+      memberCode: member.memberCode,
+      name: member.name,
+      email: member.email,
+      department: member.department,
+      joinedAt: member.joinedAt.toISOString(),
+      activeLoansCount: member.loans.filter((loan) => loan.returnedAt === null).length,
+      totalLoansCount: member.loans.length,
+    }));
+  });
 }
 
 export async function createMemberInDb(
@@ -324,46 +377,48 @@ export async function createMemberInDb(
     };
   }
 
-  const existing = await db.member.findUnique({ where: { email } });
-  if (existing) {
+  return runWithFallback(db, async (activeDb) => {
+    const existing = await activeDb.member.findUnique({ where: { email } });
+    if (existing) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'A member with this email address already exists.',
+      };
+    }
+
+    const totalMembers = await activeDb.member.count();
+    let codeNumber = 101 + totalMembers;
+    let memberCode = `LIB-${codeNumber}`;
+    while (await activeDb.member.findUnique({ where: { memberCode } })) {
+      codeNumber += 1;
+      memberCode = `LIB-${codeNumber}`;
+    }
+
+    const created = await activeDb.member.create({
+      data: {
+        memberCode,
+        name,
+        email,
+        department,
+      },
+    });
+
     return {
-      ok: false,
-      status: 409,
-      error: 'A member with this email address already exists.',
+      ok: true,
+      status: 201,
+      data: {
+        id: created.id,
+        memberCode: created.memberCode,
+        name: created.name,
+        email: created.email,
+        department: created.department,
+        joinedAt: created.joinedAt.toISOString(),
+        activeLoansCount: 0,
+        totalLoansCount: 0,
+      },
     };
-  }
-
-  const totalMembers = await db.member.count();
-  let codeNumber = 101 + totalMembers;
-  let memberCode = `LIB-${codeNumber}`;
-  while (await db.member.findUnique({ where: { memberCode } })) {
-    codeNumber += 1;
-    memberCode = `LIB-${codeNumber}`;
-  }
-
-  const created = await db.member.create({
-    data: {
-      memberCode,
-      name,
-      email,
-      department,
-    },
   });
-
-  return {
-    ok: true,
-    status: 201,
-    data: {
-      id: created.id,
-      memberCode: created.memberCode,
-      name: created.name,
-      email: created.email,
-      department: created.department,
-      joinedAt: created.joinedAt.toISOString(),
-      activeLoansCount: 0,
-      totalLoansCount: 0,
-    },
-  };
 }
 
 export async function listLoansWithDetails(
@@ -377,16 +432,18 @@ export async function listLoansWithDetails(
         ? { NOT: { returnedAt: null } }
         : {};
 
-  const rows = await db.loan.findMany({
-    where,
-    orderBy: { issuedAt: 'desc' },
-    include: {
-      book: { select: { title: true, author: true, callNumber: true } },
-      member: { select: { name: true, memberCode: true } },
-    },
-  });
+  return runWithFallback(db, async (activeDb) => {
+    const rows = await activeDb.loan.findMany({
+      where,
+      orderBy: { issuedAt: 'desc' },
+      include: {
+        book: { select: { title: true, author: true, callNumber: true } },
+        member: { select: { name: true, memberCode: true } },
+      },
+    });
 
-  return (rows as LoanRowWithRelations[]).map(mapLoanItem);
+    return (rows as LoanRowWithRelations[]).map(mapLoanItem);
+  });
 }
 
 export async function issueBookInDb(
@@ -414,62 +471,64 @@ export async function issueBookInDb(
     Number.isInteger(parsedDays) && parsedDays >= 1 && parsedDays <= 60 ? parsedDays : 14;
   const dueAt = new Date(now.getTime() + loanDays * 24 * 60 * 60 * 1000);
 
-  return db.$transaction(async (tx) => {
-    const book = await tx.book.findUnique({ where: { id: bookId } });
-    if (!book) {
+  return runWithFallback(db, (activeDb) =>
+    activeDb.$transaction(async (tx) => {
+      const book = await tx.book.findUnique({ where: { id: bookId } });
+      if (!book) {
+        return {
+          ok: false,
+          status: 404,
+          error: `Book "${bookId}" was not found.`,
+        };
+      }
+
+      const member = await tx.member.findUnique({ where: { id: memberId } });
+      if (!member) {
+        return {
+          ok: false,
+          status: 404,
+          error: `Member "${memberId}" was not found.`,
+        };
+      }
+
+      const activeLoan = await tx.loan.findFirst({
+        where: { bookId: book.id, returnedAt: null },
+      });
+
+      if (!book.available || activeLoan) {
+        return {
+          ok: false,
+          status: 409,
+          error: `"${book.title}" is currently issued and unavailable.`,
+        };
+      }
+
+      const createdLoan = await tx.loan.create({
+        data: {
+          bookId: book.id,
+          memberId: member.id,
+          issuedAt: now,
+          dueAt,
+          returnedAt: null,
+        },
+        include: {
+          book: { select: { title: true, author: true, callNumber: true } },
+          member: { select: { name: true, memberCode: true } },
+        },
+      });
+
+      await tx.book.update({
+        where: { id: book.id },
+        data: { available: false },
+      });
+
       return {
-        ok: false,
-        status: 404,
-        error: `Book "${bookId}" was not found.`,
+        ok: true,
+        status: 201,
+        data: mapLoanItem(createdLoan as LoanRowWithRelations),
       };
-    }
-
-    const member = await tx.member.findUnique({ where: { id: memberId } });
-    if (!member) {
-      return {
-        ok: false,
-        status: 404,
-        error: `Member "${memberId}" was not found.`,
-      };
-    }
-
-    const activeLoan = await tx.loan.findFirst({
-      where: { bookId: book.id, returnedAt: null },
-    });
-
-    if (!book.available || activeLoan) {
-      return {
-        ok: false,
-        status: 409,
-        error: `"${book.title}" is currently issued and unavailable.`,
-      };
-    }
-
-    const createdLoan = await tx.loan.create({
-      data: {
-        bookId: book.id,
-        memberId: member.id,
-        issuedAt: now,
-        dueAt,
-        returnedAt: null,
-      },
-      include: {
-        book: { select: { title: true, author: true, callNumber: true } },
-        member: { select: { name: true, memberCode: true } },
-      },
-    });
-
-    await tx.book.update({
-      where: { id: book.id },
-      data: { available: false },
-    });
-
-    return {
-      ok: true,
-      status: 201,
-      data: mapLoanItem(createdLoan as LoanRowWithRelations),
-    };
-  });
+    }),
+  );
 }
 
 export async function returnLoanInDb(
@@ -486,60 +545,62 @@ export async function returnLoanInDb(
     };
   }
 
-  return db.$transaction(async (tx) => {
-    const existing = await tx.loan.findUnique({
-      where: { id: loanId },
-      include: {
-        book: { select: { title: true, author: true, callNumber: true } },
-        member: { select: { name: true, memberCode: true } },
-      },
-    });
-
-    if (!existing) {
-      return {
-        ok: false,
-        status: 404,
-        error: `Loan "${loanId}" was not found.`,
-      };
-    }
-
-    if (existing.returnedAt !== null) {
-      return {
-        ok: false,
-        status: 409,
-        error: 'This loan has already been returned.',
-        data: mapLoanItem(existing as LoanRowWithRelations),
-      };
-    }
-
-    const updatedLoan = await tx.loan.update({
-      where: { id: existing.id },
-      data: { returnedAt: now },
-      include: {
-        book: { select: { title: true, author: true, callNumber: true } },
-        member: { select: { name: true, memberCode: true } },
-      },
-    });
-
-    const otherActiveLoan = await tx.loan.findFirst({
-      where: {
-        bookId: existing.bookId,
-        id: { not: existing.id },
-        returnedAt: null,
-      },
-    });
-
-    if (!otherActiveLoan) {
-      await tx.book.update({
-        where: { id: existing.bookId },
-        data: { available: true },
+  return runWithFallback(db, (activeDb) =>
+    activeDb.$transaction(async (tx) => {
+      const existing = await tx.loan.findUnique({
+        where: { id: loanId },
+        include: {
+          book: { select: { title: true, author: true, callNumber: true } },
+          member: { select: { name: true, memberCode: true } },
+        },
       });
-    }
 
-    return {
-      ok: true,
-      status: 200,
-      data: mapLoanItem(updatedLoan as LoanRowWithRelations),
-    };
-  });
+      if (!existing) {
+        return {
+          ok: false,
+          status: 404,
+          error: `Loan "${loanId}" was not found.`,
+        };
+      }
+
+      if (existing.returnedAt !== null) {
+        return {
+          ok: false,
+          status: 409,
+          error: 'This loan has already been returned.',
+          data: mapLoanItem(existing as LoanRowWithRelations),
+        };
+      }
+
+      const updatedLoan = await tx.loan.update({
+        where: { id: existing.id },
+        data: { returnedAt: now },
+        include: {
+          book: { select: { title: true, author: true, callNumber: true } },
+          member: { select: { name: true, memberCode: true } },
+        },
+      });
+
+      const otherActiveLoan = await tx.loan.findFirst({
+        where: {
+          bookId: existing.bookId,
+          id: { not: existing.id },
+          returnedAt: null,
+        },
+      });
+
+      if (!otherActiveLoan) {
+        await tx.book.update({
+          where: { id: existing.bookId },
+          data: { available: true },
+        });
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        data: mapLoanItem(updatedLoan as LoanRowWithRelations),
+      };
+    }),
+  );
 }
